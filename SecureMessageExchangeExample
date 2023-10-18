@@ -1,0 +1,125 @@
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import utils
+from cryptography.hazmat.primitives.asymmetric import rsa
+import os
+
+class User:
+    def __init__(self, username, password):
+        self.username = username
+        self.password = password
+        self.contacts = {}  # User's contact list
+        self.keys = {}  # Public keys of contacts
+        self.private_key = None  # User's private key
+        self.public_key = None  # User's public key
+        self.session_key = None  # Shared session key for encryption
+
+    def add_contact(self, contact):
+        # Add a contact to the user's contact list
+        self.contacts[contact.username] = contact
+
+    def remove_contact(self, contact):
+        # Remove a contact from the user's contact list
+        if contact.username in self.contacts:
+            del self.contacts[contact.username]
+
+    def generate_dh_key_pair(self):
+        # Generate Diffie-Hellman key pair
+        private_key = ec.generate_private_key(ec.SECP256K1(), default_backend())
+        self.private_key = private_key
+        self.public_key = private_key.public_key()
+
+    def exchange_dh_public_key(self, contact):
+        if self.public_key:
+            # Share the user's public Diffie-Hellman key with a contact
+            public_key_bytes = self.public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            contact.receive_dh_public_key(self.username, public_key_bytes)
+
+    def receive_dh_public_key(self, sender, public_key_bytes):
+        # Receive and store a contact's public Diffie-Hellman key
+        self.keys[sender] = serialization.load_pem_public_key(public_key_bytes)
+
+    def derive_shared_key(self, contact):
+        if self.private_key and contact.username in self.keys:
+            # Derive a shared session key with a contact using Diffie-Hellman
+            shared_key = self.private_key.exchange(ec.ECDH(), self.keys[contact.username])
+            self.session_key = shared_key
+            return shared_key
+
+    def send_encrypted_message(self, contact, message):
+        if self.session_key:
+            # Encrypt a message using a shared session key
+            # Generate a random Initialization Vector (IV)
+            iv = os.urandom(16)
+
+            # Create an encryptor with the session key and IV
+            encryptor = Cipher(
+                algorithms.AES(self.session_key),
+                modes.CFB(iv),
+                backend=default_backend()
+            ).encryptor()
+
+            # Convert the message to bytes
+            message_bytes = message.encode('utf-8')
+
+            # Encrypt the message
+            ciphertext = encryptor.update(message_bytes) + encryptor.finalize()
+
+            return (ciphertext, iv)
+
+    def receive_encrypted_message(self, sender, encrypted_message):
+        if self.private_key and sender in self.keys:
+            # Decrypt a message using the shared session key
+            # Get the IV from the encrypted message
+            iv = encrypted_message[1]
+
+            # Create a decryptor with the session key and IV
+            decryptor = Cipher(
+                algorithms.AES(self.session_key),
+                modes.CFB(iv),
+                backend=default_backend()
+            ).decryptor()
+
+            # Decrypt the message
+            decrypted_message = decryptor.update(encrypted_message[0]) + decryptor.finalize()
+
+            return decrypted_message.decode('utf-8')
+        else:
+            print("Key for the sender not found.")
+            return None
+
+# Example of usage
+alice = User("alice", "password123")
+bob = User("bob", "passw0rd")
+
+# Generate Diffie-Hellman key pairs for Alice and Bob
+alice.generate_dh_key_pair()
+bob.generate_dh_key_pair()
+
+# Add each other as contacts
+alice.add_contact(bob)
+bob.add_contact(alice)
+
+# Exchange public Diffie-Hellman keys
+alice.exchange_dh_public_key(bob)
+bob.exchange_dh_public_key(alice)
+
+# Derive a shared secret and establish a session key for encryption
+alice_shared_secret = alice.derive_shared_key(bob)
+bob_shared_secret = bob.derive_shared_key(alice)
+
+# Alice sends an encrypted message to Bob
+message = "Hello, this is a secret message!"
+encrypted_message = alice.send_encrypted_message(bob, message)
+
+# Bob receives and decrypts the message
+if encrypted_message:
+    decrypted_message = bob.receive_encrypted_message("alice", encrypted_message)
+    if decrypted_message:
+        print(f"Message for Bob: {decrypted_message}")
